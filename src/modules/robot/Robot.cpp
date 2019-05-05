@@ -272,10 +272,12 @@ void Robot::load_config()
         actuators[i]->change_last_milestone(actuator_pos[i]);
     }
 
+    #if MAX_ROBOT_ACTUATORS > 3
     // initialize any extra axis to machine position
     for (size_t i = A_AXIS; i < n_motors; i++) {
          actuators[i]->change_last_milestone(machine_position[i]);
     }
+    #endif
 
     //this->clearToolOffset();
 
@@ -431,6 +433,16 @@ Robot::wcs_t Robot::mcs2wcs(const Robot::wcs_t& pos) const
     );
 }
 
+// converts a position in work coordinate system to machine coordinate system (machine position)
+Robot::wcs_t Robot::wcs2mcs(const Robot::wcs_t& pos) const
+{
+    return std::make_tuple(
+        std::get<X_AXIS>(pos) + std::get<X_AXIS>(wcs_offsets[current_wcs]) - std::get<X_AXIS>(g92_offset) + std::get<X_AXIS>(tool_offset),
+        std::get<Y_AXIS>(pos) + std::get<Y_AXIS>(wcs_offsets[current_wcs]) - std::get<Y_AXIS>(g92_offset) + std::get<Y_AXIS>(tool_offset),
+        std::get<Z_AXIS>(pos) + std::get<Z_AXIS>(wcs_offsets[current_wcs]) - std::get<Z_AXIS>(g92_offset) + std::get<Z_AXIS>(tool_offset)
+    );
+}
+
 // this does a sanity check that actuator speeds do not exceed steps rate capability
 // we will override the actuator max_rate if the combination of max_rate and steps/sec exceeds base_stepping_frequency
 void Robot::check_max_actuator_speeds()
@@ -553,6 +565,13 @@ void Robot::on_gcode_received(void *argument)
                     // reset G92 offsets to 0
                     g92_offset = wcs_t(0, 0, 0);
 
+                } else if(gcode->subcode == 4) {
+                    // G92.4 is a smoothie special it sets manual homing for X,Y,Z
+                    // do a manual homing based on given coordinates, no endstops required
+                    if(gcode->has_letter('X')){ THEROBOT->reset_axis_position(gcode->get_value('X'), X_AXIS); }
+                    if(gcode->has_letter('Y')){ THEROBOT->reset_axis_position(gcode->get_value('Y'), Y_AXIS); }
+                    if(gcode->has_letter('Z')){ THEROBOT->reset_axis_position(gcode->get_value('Z'), Z_AXIS); }
+
                 } else if(gcode->subcode == 3) {
                     // initialize G92 to the specified values, only used for saving it with M500
                     float x= 0, y= 0, z= 0;
@@ -621,6 +640,7 @@ void Robot::on_gcode_received(void *argument)
             case 2: // M2 end of program
                 current_wcs = 0;
                 absolute_mode = true;
+                seconds_per_minute= 60;
                 break;
             case 17:
                 THEKERNEL->call_event(ON_ENABLE, (void*)1); // turn all enable pins on
@@ -634,6 +654,7 @@ void Robot::on_gcode_received(void *argument)
                         char axis= (i <= Z_AXIS ? 'X'+i : 'A'+(i-3));
                         if(gcode->has_letter(axis)) bm |= (0x02<<i); // set appropriate bit
                     }
+
                     // handle E parameter as currently selected extruder ABC
                     if(gcode->has_letter('E')) {
                         // find first selected extruder
@@ -1350,7 +1371,7 @@ bool Robot::append_milestone(const float target[], float rate_mm_s)
         return true;
     }
 
-    // no actual move
+    // no actual move, should never happen
     return false;
 }
 
@@ -1373,6 +1394,7 @@ bool Robot::delta_move(const float *delta, float rate_mm_s, uint8_t naxis)
         target[i] += delta[i];
     }
 
+    is_g123= false; // we don't want the laser to fire
     // submit for planning and if moved update machine_position
     if(append_milestone(target, rate_mm_s)) {
          memcpy(machine_position, target, n_motors*sizeof(float));

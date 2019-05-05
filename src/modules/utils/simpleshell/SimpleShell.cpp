@@ -216,7 +216,12 @@ void SimpleShell::on_console_line_received( void *argument )
             case 'G':
                 // issue get state
                 get_command("state", new_message.stream);
-                //new_message.stream->printf("ok\n"); // sending this while printing will cause ok count to get out of sync
+                new_message.stream->printf("ok\n");
+                break;
+
+            case 'I':
+                // issue get state for smoopi
+                get_command("state", new_message.stream);
                 break;
 
             case 'X':
@@ -242,6 +247,10 @@ void SimpleShell::on_console_line_received( void *argument )
                     THEKERNEL->call_event(ON_GCODE_RECEIVED, &gcode);
                 }
                 new_message.stream->printf("ok\n");
+                break;
+
+            case 'S':
+                switch_command(possible_command, new_message.stream);
                 break;
 
             case 'J':
@@ -644,6 +653,12 @@ void SimpleShell::version_command( string parameters, StreamOutput *stream)
     stream->printf("  NOMSD Build\r\n");
     #endif
     stream->printf("%d axis\n", MAX_ROBOT_ACTUATORS);
+    if(!(dev & 0x00100000)) {
+        stream->printf("WARNING: This is not a sanctioned board and may be unreliable and even dangerous.\nThis MCU is deprecated, and cannot guarantee proper function\n");
+        THEKERNEL->set_bad_mcu(true);
+    }else{
+        THEKERNEL->set_bad_mcu(false);
+    }
 }
 
 // Reset the system
@@ -677,6 +692,17 @@ static int get_active_tool()
     } else {
         return 0;
     }
+}
+
+static bool get_spindle_state()
+{
+    // get spindle switch state
+    struct pad_switch pad;
+    bool ok = PublicData::get_value(switch_checksum, get_checksum("spindle"), 0, &pad);
+    if (!ok) {
+        return false;
+    }
+    return pad.state;
 }
 
 void SimpleShell::grblDP_command( string parameters, StreamOutput *stream)
@@ -833,9 +859,9 @@ void SimpleShell::get_command( string parameters, StreamOutput *stream)
         grblDP_command("-v", stream);
 
     } else if (what == "state") {
-        // also $G
+        // also $G and $I
         // [G0 G54 G17 G21 G90 G94 M0 M5 M9 T0 F0.]
-        stream->printf("[G%d %s G%d G%d G%d G94 M0 M5 M9 T%d F%1.4f S%1.4f]\n",
+        stream->printf("[G%d %s G%d G%d G%d G94 M0 M%c M9 T%d F%1.4f S%1.4f]\n",
             THEKERNEL->gcode_dispatch->get_modal_command(),
             wcs2gcode(THEROBOT->get_current_wcs()).c_str(),
             THEROBOT->plane_axis_0 == X_AXIS && THEROBOT->plane_axis_1 == Y_AXIS && THEROBOT->plane_axis_2 == Z_AXIS ? 17 :
@@ -843,6 +869,7 @@ void SimpleShell::get_command( string parameters, StreamOutput *stream)
               THEROBOT->plane_axis_0 == Y_AXIS && THEROBOT->plane_axis_1 == Z_AXIS && THEROBOT->plane_axis_2 == X_AXIS ? 19 : 17,
             THEROBOT->inch_mode ? 20 : 21,
             THEROBOT->absolute_mode ? 90 : 91,
+            get_spindle_state()?'3':'5',
             get_active_tool(),
             THEROBOT->from_millimeters(THEROBOT->get_feed_rate()),
             THEROBOT->get_s_value());
@@ -919,8 +946,28 @@ void SimpleShell::calc_thermistor_command( string parameters, StreamOutput *stre
 // set or get switch state for a named switch
 void SimpleShell::switch_command( string parameters, StreamOutput *stream)
 {
-    string type = shift_parameter( parameters );
-    string value = shift_parameter( parameters );
+    string type;
+    string value;
+
+    if(parameters[0] == '$') {
+        // $S command
+        type = shift_parameter( parameters );
+        while(!type.empty()) {
+            struct pad_switch pad;
+            bool ok = PublicData::get_value(switch_checksum, get_checksum(type), 0, &pad);
+            if(ok) {
+                stream->printf("switch %s is %d\n", type.c_str(), pad.state);
+            }
+
+            type = shift_parameter( parameters );
+        }
+        return;
+
+    }else{
+        type = shift_parameter( parameters );
+        value = shift_parameter( parameters );
+    }
+
     bool ok = false;
     if(value.empty()) {
         // get switch state
@@ -938,8 +985,8 @@ void SimpleShell::switch_command( string parameters, StreamOutput *stream)
             bool b = value == "on";
             ok = PublicData::set_value( switch_checksum, get_checksum(type), state_checksum, &b );
         } else {
-            float v = strtof(value.c_str(), NULL);
-            ok = PublicData::set_value( switch_checksum, get_checksum(type), value_checksum, &v );
+            stream->printf("must be either on or off\n");
+            return;
         }
         if (ok) {
             stream->printf("switch %s set to: %s\n", type.c_str(), value.c_str());
@@ -1138,52 +1185,73 @@ void SimpleShell::test_command( string parameters, StreamOutput *stream)
 
 void SimpleShell::jog(string parameters, StreamOutput *stream)
 {
-    // $J X0.1 F0.5
+    // $J X0.1 [Y0.2] [F0.5]
     int n_motors= THEROBOT->get_number_registered_motors();
 
     // get axis to move and amount (X0.1)
-    // for now always 1 axis
-    size_t npos= parameters.find_first_of("XYZABC");
-    if(npos == string::npos) {
-        stream->printf("usage: $J X|Y|Z|A|B|C 0.01 [F0.5]\n");
-        return;
-    }
+    // may specify multiple axis
 
-    string s = parameters.substr(npos);
-    if(s.empty() || s.size() < 2) {
-        stream->printf("usage: $J X0.01 [F0.5]\n");
-        return;
-    }
-    char ax= toupper(s[0]);
-    uint8_t a= ax >= 'X' ? ax - 'X' : ax - 'A' + 3;
-    if(a >= n_motors) {
-        stream->printf("error:bad axis\n");
-        return;
-    }
-
-    float d= strtof(s.substr(1).c_str(), NULL);
-
+    float rate_mm_s= NAN;
+    float scale= 1.0F;
     float delta[n_motors];
     for (int i = 0; i < n_motors; ++i) {
         delta[i]= 0;
     }
-    delta[a]= d;
 
-    // get speed scale
-    float scale= 1.0F;
-    npos= parameters.find_first_of("F");
-    if(npos != string::npos && npos+1 < parameters.size()) {
-        scale= strtof(parameters.substr(npos+1).c_str(), NULL);
+    // $J is first parameter
+    shift_parameter(parameters);
+    if(parameters.empty()) {
+        stream->printf("usage: $J X0.01 [F0.5] - axis can be XYZABC, optional speed is scale of max_rate\n");
+        return;
     }
 
-    THEROBOT->push_state();
-    float rate_mm_s= THEROBOT->actuators[a]->get_max_rate() * scale;
-    THEROBOT->delta_move(delta, rate_mm_s, n_motors);
+    while(!parameters.empty()) {
+        string p= shift_parameter(parameters);
 
+        char ax= toupper(p[0]);
+        if(ax == 'F') {
+            // get speed scale
+            scale= strtof(p.substr(1).c_str(), NULL);
+            continue;
+        }
+
+        if(!((ax >= 'X' && ax <= 'Z') || (ax >= 'A' && ax <= 'C'))) {
+            stream->printf("error:bad axis %c\n", ax);
+            return;
+        }
+
+        uint8_t a= ax >= 'X' ? ax - 'X' : ax - 'A' + 3;
+        if(a >= n_motors) {
+            stream->printf("error:axis out of range %c\n", ax);
+            return;
+        }
+
+        delta[a]= strtof(p.substr(1).c_str(), NULL);
+    }
+
+    // select slowest axis rate to use
+    bool ok= false;
+    for (int i = 0; i < n_motors; ++i) {
+        if(delta[i] != 0) {
+            ok= true;
+            if(isnan(rate_mm_s)) {
+                rate_mm_s= THEROBOT->actuators[i]->get_max_rate();
+            }else{
+                rate_mm_s = std::min(rate_mm_s, THEROBOT->actuators[i]->get_max_rate());
+            }
+            //hstream->printf("%d %f F%f\n", i, delta[i], rate_mm_s);
+        }
+    }
+    if(!ok) {
+        stream->printf("error:no delta jog specified\n");
+        return;
+    }
+
+    //stream->printf("F%f\n", rate_mm_s*scale);
+
+    THEROBOT->delta_move(delta, rate_mm_s*scale, n_motors);
     // turn off queue delay and run it now
     THECONVEYOR->force_queue();
-    THEROBOT->pop_state();
-    //stream->printf("Jog: %c%f F%f\n", ax, d, scale);
 }
 
 void SimpleShell::help_command( string parameters, StreamOutput *stream )
