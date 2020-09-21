@@ -491,7 +491,11 @@ void SimpleShell::upload_command( string parameters, StreamOutput *stream )
             continue;
         }
 
-        char c = stream->_getc();
+        int c = stream->_getc();
+        if(c == -1) {
+            stream->printf("error reading input, aborting\n");
+            return;
+        }
         if( c == 4 || c == 26) { // ctrl-D or ctrl-Z
             uploading = false;
             // close file
@@ -518,10 +522,15 @@ void SimpleShell::upload_command( string parameters, StreamOutput *stream )
         }
     }
     // we got an error so ignore everything until EOF
-    char c;
+    int c;
     do {
         if(stream->ready()) {
             c= stream->_getc();
+            if(c == -1) {
+                stream->printf("error reading input, aborting\n");
+                return;
+            }
+
         }else{
             THEKERNEL->call_event(ON_IDLE);
             c= 0;
@@ -1273,8 +1282,23 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
         return;
     }
 
+    bool cont_mode= false;
     while(!parameters.empty()) {
         string p= shift_parameter(parameters);
+
+        if(p.size() == 2 && p[0] == '-') {
+            // process option
+            switch(toupper(p[1])) {
+                case 'C':
+                    cont_mode= true;
+                    break;
+                default:
+                    stream->printf("error:illegal option %c\n", p[1]);
+                    return;
+            }
+            continue;
+        }
+
 
         char ax= toupper(p[0]);
         if(ax == 'S') {
@@ -1316,10 +1340,59 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
     }
 
     //stream->printf("F%f\n", rate_mm_s*scale);
+    // There is a race condition where a quick press/release could send the ^Y before the $J -c is executed
+    // this would result in continuous movement, not a good thing.
+    // so check if stop request is true and abort if it is, this means we must leave stop request false after this
+    if(THEKERNEL->get_stop_request()) {
+        THEKERNEL->set_stop_request(false);
+        stream->printf("ok\n");
+        return;
+    }
 
-    THEROBOT->delta_move(delta, rate_mm_s*scale, n_motors);
-    // turn off queue delay and run it now
-    THECONVEYOR->force_queue();
+    if(cont_mode) {
+        // continuous jog mode
+        float fr= rate_mm_s*scale;
+        // calculate minimum distance to travel to accomodate acceleration and feedrate
+        float acc= THEROBOT->get_default_acceleration();
+        float t= fr/acc; // time to reach frame rate
+        float d= 0.5F * acc * powf(t, 2); // distance required to accelerate (or decelerate)
+
+        // we need to move at least this distance to reach full speed
+        for (int i = 0; i < n_motors; ++i) {
+            if(delta[i] != 0) {
+                delta[i]= d * (delta[i]<0?-1:1);
+            }
+        }
+
+        // turn off any compensation transform so Z does not move as we jog
+        auto savect= THEROBOT->compensationTransform;
+        THEROBOT->reset_compensated_machine_position();
+
+        // feed moves into planner until full then keep it topped up
+        while(!THEKERNEL->get_stop_request()) {
+            while(!THECONVEYOR->is_queue_full()) {
+                if(THEKERNEL->get_stop_request() || THEKERNEL->is_halted()) break;
+                THEROBOT->delta_move(delta, fr, n_motors);
+            }
+            if(THEKERNEL->is_halted()) break;
+            THEKERNEL->call_event(ON_IDLE);
+        }
+        // fast foward all blocks but the last which is a deceleration block
+        THECONVEYOR->set_controlled_stop(true);
+        THECONVEYOR->wait_for_idle();
+        THEKERNEL->set_stop_request(false);
+        THECONVEYOR->set_controlled_stop(false);
+        // reset the position based on current actuator position
+        THEROBOT->reset_position_from_current_actuator_position();
+        // restore compensationTransform
+        THEROBOT->compensationTransform= savect;
+        stream->printf("ok\n");
+
+    }else{
+        THEROBOT->delta_move(delta, rate_mm_s*scale, n_motors);
+        // turn off queue delay and run it now
+        THECONVEYOR->force_queue();
+    }
 }
 
 void SimpleShell::help_command( string parameters, StreamOutput *stream )
