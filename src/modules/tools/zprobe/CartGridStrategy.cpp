@@ -454,6 +454,11 @@ bool CartGridStrategy::handleGcode(Gcode *gcode)
         } else if(gcode->m == 375) { // M375: load grid, M375.1 display grid
             if(gcode->subcode == 1) {
                 print_bed_level(gcode->stream);
+                if(THEROBOT->compensationTransform == nullptr){
+                    gcode->stream->printf("Grid is currently disabled\n");
+                }else{
+                    gcode->stream->printf("Grid is currently enabled\n");
+                }
             } else {
                 __disable_irq();
                 if(load_grid(gcode->stream)) setAdjustFunction(true);
@@ -738,7 +743,7 @@ void CartGridStrategy::doCompensation(float *target, bool inverse)
 
     // we need to make sure that floor_x and floor_y are always < grid_size-1
     float grid_x = std::max(0.001F, std::min(this->current_grid_x_size - 1.001F, (x_target - this->x_start) / (this->x_size / (this->current_grid_x_size - 1))));
-    float grid_y = std::max(0.001F, std::min(this->current_grid_x_size - 1.001F, (y_target - this->y_start) / (this->y_size / (this->current_grid_y_size - 1))));
+    float grid_y = std::max(0.001F, std::min(this->current_grid_y_size - 1.001F, (y_target - this->y_start) / (this->y_size / (this->current_grid_y_size - 1))));
     int floor_x = floorf(grid_x);
     int floor_y = floorf(grid_y);
     float ratio_x = grid_x - floor_x;
