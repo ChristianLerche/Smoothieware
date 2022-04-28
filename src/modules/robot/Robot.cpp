@@ -599,9 +599,9 @@ void Robot::on_gcode_received(void *argument)
                 } else if(gcode->subcode == 4) {
                     // G92.4 is a smoothie special it sets manual homing for X,Y,Z
                     // do a manual homing based on given coordinates, no endstops required
-                    if(gcode->has_letter('X')){ THEROBOT->reset_axis_position(gcode->get_value('X'), X_AXIS); }
-                    if(gcode->has_letter('Y')){ THEROBOT->reset_axis_position(gcode->get_value('Y'), Y_AXIS); }
-                    if(gcode->has_letter('Z')){ THEROBOT->reset_axis_position(gcode->get_value('Z'), Z_AXIS); }
+                    if(gcode->has_letter('X')){ THEROBOT->reset_axis_position(to_millimeters(gcode->get_value('X')), X_AXIS); }
+                    if(gcode->has_letter('Y')){ THEROBOT->reset_axis_position(to_millimeters(gcode->get_value('Y')), Y_AXIS); }
+                    if(gcode->has_letter('Z')){ THEROBOT->reset_axis_position(to_millimeters(gcode->get_value('Z')), Z_AXIS); }
 
                 } else if(gcode->subcode == 3) {
                     // initialize G92 to the specified values, only used for saving it with M500
@@ -642,7 +642,7 @@ void Robot::on_gcode_received(void *argument)
                         actuators[selected_extruder]->change_last_milestone(get_e_scale_fnc ? e*get_e_scale_fnc() : e);
                     }
                 }
-                if(gcode->subcode == 0 && gcode->get_num_args() > 0) {
+                if((gcode->subcode == 0 || gcode->subcode == 4) && gcode->get_num_args() > 0) {
                     for (int i = A_AXIS; i < n_motors; i++) {
                         // ABC just need to set machine_position and compensated_machine_position if specified
                         char axis= 'A'+i-3;
