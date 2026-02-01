@@ -280,6 +280,13 @@ void Switch::on_config_reload(void *argument)
     // for commands we need to replace _ for space
     std::replace(output_on_command.begin(), output_on_command.end(), '_', ' '); // replace _ with space
     std::replace(output_off_command.begin(), output_off_command.end(), '_', ' '); // replace _ with space
+
+    // Special handling of $J STOP to stop continuous jog
+    // $J STOP is a special command executed in pinpoll tick
+    this->handle_stop_cmd = false;
+    if(is_input && output_off_command == "$J STOP") {
+        this->handle_stop_cmd = true;
+    }
 }
 
 bool Switch::match_input_on_gcode(const Gcode *gcode) const
@@ -491,6 +498,13 @@ uint32_t Switch::pinpoll_tick(uint32_t dummy)
             }
         }
     }
+
+    // Special handling of $J STOP to stop continuous jog
+    if(this->handle_stop_cmd && this->switch_changed && !this->switch_state) {
+        THEKERNEL->set_stop_request(true);
+        this->switch_changed = false;
+    }
+
     return 0;
 }
 

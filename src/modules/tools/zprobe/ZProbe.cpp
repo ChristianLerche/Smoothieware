@@ -345,7 +345,14 @@ void ZProbe::on_gcode_received(void *argument)
             pin.set_inverting(pin.is_inverting() != invert_override); // XOR so inverted pin is not inverted and vice versa
         }
 
+        // turn off any compensation transform so Z does not move as XY moves
+        auto savect= THEROBOT->compensationTransform;
+        THEROBOT->compensationTransform= nullptr;
+
         probe_XYZ(gcode);
+
+        // restore compensationTransform
+        THEROBOT->compensationTransform= savect;
 
         if(gcode->subcode == 4 || gcode->subcode == 5) {
             // restore probe sense invert

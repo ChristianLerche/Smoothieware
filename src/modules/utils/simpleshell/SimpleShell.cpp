@@ -1284,6 +1284,7 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
     }
 
     bool cont_mode= false;
+    bool send_ok= false;
     while(!parameters.empty()) {
         string p= shift_parameter(parameters);
 
@@ -1292,6 +1293,9 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
             switch(toupper(p[1])) {
                 case 'C':
                     cont_mode= true;
+                    break;
+                case 'R': // send ok when done use this when sending $J in a gcode file
+                    send_ok= true;
                     break;
                 default:
                     stream->printf("error:illegal option %c\n", p[1]);
@@ -1426,6 +1430,7 @@ void SimpleShell::jog(string parameters, StreamOutput *stream)
         THEROBOT->delta_move(delta, fr, n_motors);
         // turn off queue delay and run it now
         THECONVEYOR->force_queue();
+        if(send_ok) stream->printf("ok\n");
     }
 }
 
